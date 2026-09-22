@@ -36,9 +36,9 @@
 +  return base::FeatureList::IsEnabled(kHeliumCompactLocationWidth);
 +}
 +
- // Enables the use of WGC for the Eye Dropper screen capture.
- BASE_FEATURE(kAllowEyeDropperWGCScreenCapture,
- #if BUILDFLAG(IS_WIN)
+ BASE_FEATURE(kHeliumAdaptiveTabColor, base::FEATURE_ENABLED_BY_DEFAULT);
+ BASE_FEATURE_PARAM(double,
+                    kHeliumAdaptiveTabColorMinContrast,
 --- a/chrome/browser/ui/ui_features.h
 +++ b/chrome/browser/ui/ui_features.h
 @@ -23,6 +23,9 @@ BASE_DECLARE_FEATURE(kBookmarkOpenAllCon
@@ -48,9 +48,9 @@
 +BASE_DECLARE_FEATURE(kHeliumCompactLocationWidth);
 +bool HeliumUseCompactLocationWidth();
 +
- BASE_DECLARE_FEATURE(kAllowEyeDropperWGCScreenCapture);
+ BASE_DECLARE_FEATURE(kHeliumAdaptiveTabColor);
+ BASE_DECLARE_FEATURE_PARAM(double, kHeliumAdaptiveTabColorMinContrast);
  
- // Enables a compositor-driven rotation animation for the tab load throbber.
 --- a/chrome/browser/ui/views/frame/browser_view.h
 +++ b/chrome/browser/ui/views/frame/browser_view.h
 @@ -81,6 +81,7 @@ class ContentsContainerView;
