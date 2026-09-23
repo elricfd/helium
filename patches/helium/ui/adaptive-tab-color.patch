@@ -28,7 +28,7 @@
  #if BUILDFLAG(IS_WIN)
 --- a/ui/color/color_provider_key.h
 +++ b/ui/color/color_provider_key.h
-@@ -140,6 +140,7 @@ struct COMPONENT_EXPORT(COLOR_PROVIDER_KEY) ColorProvi
+@@ -142,6 +142,7 @@ struct COMPONENT_EXPORT(COLOR_PROVIDER_KEY) ColorProvi
    FrameStyle frame_style = FrameStyle::kDefault;
    UserColorSource user_color_source = UserColorSource::kAccent;
    std::optional<SkColor> user_color = std::nullopt;
@@ -36,55 +36,59 @@
    std::optional<SchemeVariant> scheme_variant = std::nullopt;
    scoped_refptr<ThemeInitializerSupplier> custom_theme = nullptr;
    // Only dereferenced when populating the ColorMixer. After that, used to
-@@ -160,20 +161,24 @@ struct COMPONENT_EXPORT(COLOR_PROVIDER_KEY) ColorProvi
+@@ -163,22 +164,26 @@ struct COMPONENT_EXPORT(COLOR_PROVIDER_KEY) ColorProvi
  #if BUILDFLAG(IS_ANDROID)
      return std::tie(color_mode, contrast_mode, forced_colors, system_theme,
                      frame_type, frame_style, user_color_source, user_color,
 +                    adaptive_color,
                      scheme_variant, custom_theme, lhs_app_controller,
-                     context_hash) ==
+                     system_theme_version, context_hash) ==
             std::tie(other.color_mode, other.contrast_mode, other.forced_colors,
                      other.system_theme, other.frame_type, other.frame_style,
                      other.user_color_source, other.user_color,
 +                    other.adaptive_color,
                      other.scheme_variant, other.custom_theme,
-                     rhs_app_controller, other.context_hash);
+                     rhs_app_controller, other.system_theme_version,
+                     other.context_hash);
  #else
      return std::tie(color_mode, contrast_mode, forced_colors, system_theme,
                      frame_type, frame_style, user_color_source, user_color,
 +                    adaptive_color,
-                     scheme_variant, custom_theme, lhs_app_controller) ==
+                     scheme_variant, custom_theme, lhs_app_controller,
+                     system_theme_version) ==
             std::tie(other.color_mode, other.contrast_mode, other.forced_colors,
                      other.system_theme, other.frame_type, other.frame_style,
                      other.user_color_source, other.user_color,
 +                    other.adaptive_color,
                      other.scheme_variant, other.custom_theme,
-                     rhs_app_controller);
+                     rhs_app_controller, other.system_theme_version);
  #endif
-@@ -185,20 +190,24 @@ struct COMPONENT_EXPORT(COLOR_PROVIDER_KEY) ColorProvi
+@@ -190,22 +195,26 @@ struct COMPONENT_EXPORT(COLOR_PROVIDER_KEY) ColorProvi
  #if BUILDFLAG(IS_ANDROID)
      return std::tie(color_mode, contrast_mode, forced_colors, system_theme,
                      frame_type, frame_style, user_color_source, user_color,
 +                    adaptive_color,
                      scheme_variant, custom_theme, lhs_app_controller,
-                     context_hash) <
+                     system_theme_version, context_hash) <
             std::tie(other.color_mode, other.contrast_mode, other.forced_colors,
                      other.system_theme, other.frame_type, other.frame_style,
                      other.user_color_source, other.user_color,
 +                    other.adaptive_color,
                      other.scheme_variant, other.custom_theme,
-                     rhs_app_controller, other.context_hash);
+                     rhs_app_controller, other.system_theme_version,
+                     other.context_hash);
  #else
      return std::tie(color_mode, contrast_mode, forced_colors, system_theme,
                      frame_type, frame_style, user_color_source, user_color,
 +                    adaptive_color,
-                     scheme_variant, custom_theme, lhs_app_controller) <
+                     scheme_variant, custom_theme, lhs_app_controller,
+                     system_theme_version) <
             std::tie(other.color_mode, other.contrast_mode, other.forced_colors,
                      other.system_theme, other.frame_type, other.frame_style,
                      other.user_color_source, other.user_color,
 +                    other.adaptive_color,
                      other.scheme_variant, other.custom_theme,
-                     rhs_app_controller);
+                     rhs_app_controller, other.system_theme_version);
  #endif
 --- a/ui/color/color_provider_manager.cc
 +++ b/ui/color/color_provider_manager.cc
@@ -113,7 +117,7 @@
      RecordTimeSpentInitializingColorProvider(timer.Elapsed());
 --- a/chrome/browser/ui/color/material_chrome_color_mixer.cc
 +++ b/chrome/browser/ui/color/material_chrome_color_mixer.cc
-@@ -485,6 +485,11 @@ void AddMaterialChromeColorMixer(ui::ColorProvider* pr
+@@ -505,6 +505,11 @@ void AddMaterialChromeColorMixer(ui::ColorProvider* pr
    // Toolbar colors.
    mixer[kColorToolbar] = {dark_mode ? ui::kColorFrameActive
                                      : ui::kColorSysBase};
@@ -294,10 +298,10 @@
 +}
 --- a/chrome/browser/ui/BUILD.gn
 +++ b/chrome/browser/ui/BUILD.gn
-@@ -2765,6 +2765,8 @@ static_library("ui") {
-       "views/frame/web_contents_close_handler_delegate.h",
-       "views/global_error_bubble_view.cc",
-       "views/global_error_bubble_view.h",
+@@ -2605,6 +2605,8 @@ static_library("ui") {
+       "views/frame/vertical_tab_strip_background_blur_backdrop.h",
+       "views/frame/vertical_tab_strip_region_view.cc",
+       "views/frame/vertical_tab_strip_region_view.h",
 +      "views/helium/adaptive_tab_color.cc",
 +      "views/helium/adaptive_tab_color.h",
        "views/helium/frame_corner_radius.cc",
@@ -322,7 +326,7 @@
    void SetTabDragKind(TabDragKind tab_drag_kind);
    TabDragKind tab_drag_kind() const { return tab_drag_kind_; }
  
-@@ -192,6 +195,9 @@ class BrowserWidget : public views::Widget,
+@@ -201,6 +204,9 @@ class BrowserWidget : public views::Widget,
  #if BUILDFLAG(IS_LINUX)
    bool tiled_ = false;
  #endif
@@ -342,21 +346,21 @@
  #include "chrome/browser/ui/web_applications/app_browser_controller.h"
  #include "chrome/common/chrome_switches.h"
  #include "ui/base/hit_test.h"
-@@ -227,6 +228,13 @@ void BrowserWidget::InitBrowserWidget() {
-   if (!browser_native_widget_->UsesNativeSystemMenu()) {
+@@ -235,6 +236,13 @@ void BrowserWidget::InitBrowserWidget() {
      DCHECK(non_client_view());
      non_client_view()->set_context_menu_controller(this);
-+  }
+   }
 +
 +  if (browser->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL &&
 +      !IsIncognitoBrowser() &&
 +      base::FeatureList::IsEnabled(features::kHeliumAdaptiveTabColor)) {
 +    adaptive_tab_color_ = std::make_unique<AdaptiveTabColor>(
 +        this, browser->GetTabStripModel());
-   }
++  }
  }
  
-@@ -260,6 +268,13 @@ bool BrowserWidget::HandleKeyboardEvent(
+ BrowserFrameView* BrowserWidget::GetFrameView() const {
+@@ -267,6 +275,13 @@ bool BrowserWidget::HandleKeyboardEvent(
           browser_native_widget_->HandleKeyboardEvent(event);
  }
  
@@ -370,22 +374,22 @@
  void BrowserWidget::UserChangedTheme(BrowserThemeChangeType theme_change_type) {
    if (base::FeatureList::IsEnabled(features::kThemeChangeOptimization)) {
      ResetLastColorProviderKey();
-@@ -514,6 +529,12 @@ ui::ColorProviderKey BrowserWidget::GetColorProviderKe
-     key.frame_style = ui::ColorProviderKey::FrameStyle::kSystem;
+@@ -524,6 +539,12 @@ ui::ColorProviderKey BrowserWidget::GetColorProviderKe
    }
  #endif
-+
+ 
 +  if (!key.custom_theme && !key.app_controller &&
 +      key.contrast_mode == ui::ColorProviderKey::ContrastMode::kNormal &&
 +      key.forced_colors == ui::ColorProviderKey::ForcedColors::kNone) {
 +    key.adaptive_color = adaptive_color_;
 +  }
- 
-   return key;
- }
++
+   if (auto* const glass_frame_service = GlassFrameService::GetInstance()) {
+     if (glass_frame_service->IsBrowserWindowEligible(
+             browser_view_->browser())) {
 --- a/ui/views/widget/widget.cc
 +++ b/ui/views/widget/widget.cc
-@@ -2729,6 +2729,7 @@ ui::RendererColorMap Widget::GetRendererColorMap(
+@@ -2750,6 +2750,7 @@ ui::RendererColorMap Widget::GetRendererColorMap(
    auto key = GetColorProviderKey();
    key.color_mode = color_mode;
    key.forced_colors = forced_colors;
@@ -395,7 +399,7 @@
    CHECK(color_provider);
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
-@@ -4074,6 +4074,9 @@ GetPreferredColorScheme(const WebPreferences& web_pref
+@@ -4015,6 +4015,9 @@ GetPreferredColorScheme(const WebPreferences& web_pref
            web_contents->GetColorProvider().GetColor(kColorToolbar))
            ? blink::mojom::PreferredColorScheme::kDark
            : blink::mojom::PreferredColorScheme::kLight;
