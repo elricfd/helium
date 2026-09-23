@@ -131,7 +131,7 @@
    mixer[kColorToolbarButtonBorder] = {ui::kColorSysOutline};
 --- /dev/null
 +++ b/chrome/browser/ui/views/helium/adaptive_tab_color.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,58 @@
 +// Copyright 2026 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -139,8 +139,11 @@
 +#ifndef CHROME_BROWSER_UI_VIEWS_HELIUM_ADAPTIVE_TAB_COLOR_H_
 +#define CHROME_BROWSER_UI_VIEWS_HELIUM_ADAPTIVE_TAB_COLOR_H_
 +
++#include <optional>
++
 +#include "base/containers/flat_set.h"
 +#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
 +#include "base/timer/timer.h"
 +#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 +#include "content/public/browser/web_contents_observer.h"
@@ -172,36 +175,63 @@
 +  bool CanAdapt() const;
 +  void ScheduleUpdate();
 +  void Update();
++  void OnPageSampled(std::optional<SkColor> rendered);
++  void SetColor(std::optional<SkColor> color);
 +
 +  const raw_ptr<BrowserWidget> widget_;
 +  base::OneShotTimer update_timer_;
++  base::OneShotTimer settle_timer_;
 +  base::flat_set<SkColor> colors_seen_;
++  // Last color rendered along the page's top edge, kept while copies fail
++  // (e.g. the window is occluded).
++  std::optional<SkColor> last_rendered_;
++  int sample_retries_ = 0;
++  base::WeakPtrFactory<AdaptiveTabColor> weak_factory_{this};
 +};
 +
 +#endif  // CHROME_BROWSER_UI_VIEWS_HELIUM_ADAPTIVE_TAB_COLOR_H_
 --- /dev/null
 +++ b/chrome/browser/ui/views/helium/adaptive_tab_color.cc
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,204 @@
 +// Copyright 2026 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
 +
 +#include "chrome/browser/ui/views/helium/adaptive_tab_color.h"
 +
++#include <algorithm>
 +#include <optional>
 +
++#include "base/containers/flat_map.h"
++#include "base/functional/bind.h"
++#include "base/task/bind_post_task.h"
 +#include "base/time/time.h"
 +#include "chrome/browser/ui/tabs/tab_strip_model.h"
 +#include "chrome/browser/ui/ui_features.h"
 +#include "chrome/browser/ui/views/frame/browser_widget.h"
++#include "chrome/common/webui_url_constants.h"
++#include "content/public/browser/render_widget_host_view.h"
 +#include "content/public/browser/web_contents.h"
++#include "content/public/common/url_constants.h"
++#include "third_party/skia/include/core/SkBitmap.h"
 +#include "third_party/skia/include/core/SkColor.h"
 +#include "ui/gfx/color_utils.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
 +#include "url/gurl.h"
 +
 +namespace {
 +
 +constexpr base::TimeDelta kUpdateDelay = base::Milliseconds(100);
++// Samples again once the page settles after loading, e.g. the NTP background
++// image fades in over 700ms.
++constexpr base::TimeDelta kSettleDelay = base::Seconds(1);
++constexpr base::TimeDelta kSampleTimeout = base::Seconds(1);
++
++// Height of the strip sampled along the page's top edge, in DIPs.
++constexpr int kSampleHeight = 16;
++// Retries while there is no surface to copy yet, e.g. a tab just shown.
++constexpr int kMaxSampleRetries = 5;
 +
 +constexpr SkColor kTextOnDark = SkColorSetRGB(0xC6, 0xC6, 0xC6);
 +constexpr SkColor kTextOnLight = SkColorSetRGB(0x47, 0x47, 0x47);
@@ -212,6 +242,22 @@
 +  const auto level = [](unsigned c) { return (c >> 3) * 255 / 31; };
 +  return SkColorSetRGB(level(SkColorGetR(color)), level(SkColorGetG(color)),
 +                       level(SkColorGetB(color)));
++}
++
++// Most common color in `bitmap`, so text and logos don't skew the result.
++std::optional<SkColor> MostCommonColor(const SkBitmap& bitmap) {
++  if (bitmap.drawsNothing()) {
++    return std::nullopt;
++  }
++  base::flat_map<SkColor, int> counts;
++  for (int y = 0; y < bitmap.height(); ++y) {
++    for (int x = 0; x < bitmap.width(); ++x) {
++      ++counts[Quantize(bitmap.getColor(x, y))];
++    }
++  }
++  return std::ranges::max_element(counts, {}, [](const auto& entry) {
++           return entry.second;
++         })->first;
 +}
 +
 +}  // namespace
@@ -233,12 +279,16 @@
 +  if (selection.active_tab_changed()) {
 +    Observe(selection.new_contents);
 +    colors_seen_.clear();
++    last_rendered_.reset();
++    sample_retries_ = 0;
 +    Update();
 +  }
 +}
 +
 +void AdaptiveTabColor::PrimaryPageChanged(content::Page& page) {
 +  colors_seen_.clear();
++  last_rendered_.reset();
++  sample_retries_ = 0;
 +  if (!CanAdapt()) {
 +    Update();
 +  }
@@ -250,6 +300,7 @@
 +
 +void AdaptiveTabColor::DidStopLoading() {
 +  ScheduleUpdate();
++  settle_timer_.Start(FROM_HERE, kSettleDelay, this, &AdaptiveTabColor::Update);
 +}
 +
 +void AdaptiveTabColor::DidChangeThemeColor() {
@@ -261,8 +312,13 @@
 +}
 +
 +bool AdaptiveTabColor::CanAdapt() const {
-+  return web_contents() &&
-+         web_contents()->GetLastCommittedURL().SchemeIsHTTPOrHTTPS();
++  if (!web_contents()) {
++    return false;
++  }
++  const GURL& url = web_contents()->GetLastCommittedURL();
++  return url.SchemeIsHTTPOrHTTPS() ||
++         (url.SchemeIs(content::kChromeUIScheme) &&
++          url.host_piece() == chrome::kChromeUINewTabPageHost);
 +}
 +
 +void AdaptiveTabColor::ScheduleUpdate() {
@@ -271,14 +327,59 @@
 +
 +void AdaptiveTabColor::Update() {
 +  update_timer_.Stop();
++  weak_factory_.InvalidateWeakPtrs();
 +
-+  std::optional<SkColor> color;
-+  if (CanAdapt()) {
-+    color = web_contents()->GetThemeColor();
-+    if (!color) {
-+      color = web_contents()->GetBackgroundColor();
-+    }
++  content::RenderWidgetHostView* view =
++      CanAdapt() ? web_contents()->GetRenderWidgetHostView() : nullptr;
++  if (!view || !view->IsSurfaceAvailableForCopy()) {
++    OnPageSampled(std::nullopt);
++    return;
 +  }
++  gfx::Rect strip(view->GetViewBounds().size());
++  strip.set_height(std::min(strip.height(), kSampleHeight));
++  const gfx::Size output_size = gfx::ScaleToFlooredSize(strip.size(), 0.25f);
++  // An empty rect would copy the whole surface.
++  if (output_size.IsEmpty()) {
++    OnPageSampled(std::nullopt);
++    return;
++  }
++  view->CopyFromSurface(
++      strip, output_size, kSampleTimeout,
++      base::BindPostTaskToCurrentDefault(
++          base::BindOnce([](const content::CopyFromSurfaceResult& result) {
++            return result.has_value() ? MostCommonColor(result->bitmap)
++                                      : std::nullopt;
++          }).Then(base::BindOnce(&AdaptiveTabColor::OnPageSampled,
++                                 weak_factory_.GetWeakPtr()))));
++}
++
++void AdaptiveTabColor::OnPageSampled(std::optional<SkColor> rendered) {
++  if (!CanAdapt()) {
++    SetColor(std::nullopt);
++    return;
++  }
++  if (rendered) {
++    last_rendered_ = rendered;
++  } else if (sample_retries_++ < kMaxSampleRetries) {
++    ScheduleUpdate();
++  }
++
++  // theme-color wins unless the page renders with the opposite lightness, e.g.
++  // when restyled by Dark Reader. Pages without one use what's rendered along
++  // the top edge, which also covers the NTP background image.
++  std::optional<SkColor> color = web_contents()->GetThemeColor();
++  if (last_rendered_ &&
++      (!color ||
++       color_utils::IsDark(*color) != color_utils::IsDark(*last_rendered_))) {
++    color = last_rendered_;
++  }
++  if (!color) {
++    color = web_contents()->GetBackgroundColor();
++  }
++  SetColor(color);
++}
++
++void AdaptiveTabColor::SetColor(std::optional<SkColor> color) {
 +  if (color) {
 +    color = Quantize(SkColorSetA(*color, SK_AlphaOPAQUE));
 +    color = color_utils::BlendForMinContrast(
