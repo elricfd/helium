@@ -368,3 +368,4 @@ helium/ui/progress-bar.patch
 helium/ui/exclusive-access-bubble.patch
 helium/ui/hide-page-actions-flag.patch
 helium/ui/layout/ultra-compact.patch
+helium/ui/layout/toolbar-bookmarks.patch
