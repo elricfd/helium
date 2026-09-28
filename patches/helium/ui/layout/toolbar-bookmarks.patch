@@ -1,0 +1,623 @@
+--- a/chrome/common/pref_names.h
++++ b/chrome/common/pref_names.h
+@@ -757,6 +757,11 @@ inline constexpr char kShowDynamicNewTab
+ inline constexpr char kShowDynamicNewTabButton[] =
+     "helium.browser.show_dynamic_new_tab_button";
+ 
++// A boolean pref set to true if the bookmarks bar items should be visible
++// as icons on the toolbar, next to extensions.
++inline constexpr char kShowToolbarBookmarks[] =
++    "helium.browser.show_toolbar_bookmarks";
++
+ // An int pref that controls the voice typing feature. This is managed by
+ // enterprise policy.
+ inline constexpr char kVoiceTypingSettings[] = "browser.voice_typing_settings";
+--- a/chrome/browser/ui/browser_ui_prefs.cc
++++ b/chrome/browser/ui/browser_ui_prefs.cc
+@@ -170,6 +170,7 @@ void RegisterBrowserUserPrefs(user_prefs
+   registry->RegisterBooleanPref(prefs::kShowMediaButton, true);
+   registry->RegisterBooleanPref(prefs::kShowVerticalTabsCollapseButton, true);
+   registry->RegisterBooleanPref(prefs::kShowDynamicNewTabButton, true);
++  registry->RegisterBooleanPref(prefs::kShowToolbarBookmarks, false);
+ 
+   registry->RegisterBooleanPref(prefs::kWebAppCreateOnDesktop, true);
+   registry->RegisterBooleanPref(prefs::kWebAppCreateInAppsMenu, true);
+--- a/chrome/browser/ui/toolbar/pinned_toolbar/pinned_toolbar_actions_model.cc
++++ b/chrome/browser/ui/toolbar/pinned_toolbar/pinned_toolbar_actions_model.cc
+@@ -222,6 +222,7 @@ void PinnedToolbarActionsModel::ResetToD
+   pref_service_->ClearPref(prefs::kShowMediaButton);
+   pref_service_->ClearPref(prefs::kShowVerticalTabsCollapseButton);
+   pref_service_->ClearPref(prefs::kShowDynamicNewTabButton);
++  pref_service_->ClearPref(prefs::kShowToolbarBookmarks);
+ 
+   pref_service_->ClearPref(prefs::kShowHomeButton);
+   pref_service_->ClearPref(prefs::kShowForwardButton);
+@@ -246,7 +247,8 @@ bool PinnedToolbarActionsModel::IsDefaul
+                             prefs::kShowMenuButton,
+                             prefs::kShowMediaButton,
+                             prefs::kShowVerticalTabsCollapseButton,
+-                            prefs::kShowDynamicNewTabButton},
++                            prefs::kShowDynamicNewTabButton,
++                            prefs::kShowToolbarBookmarks},
+       is_default_pref_value);
+ }
+ 
+--- a/chrome/browser/extensions/api/settings_private/prefs_util.cc
++++ b/chrome/browser/extensions/api/settings_private/prefs_util.cc
+@@ -356,6 +356,8 @@ const PrefsUtil::TypedPrefMap& PrefsUtil
+   (*s_allowlist)[::prefs::kShowVerticalTabsCollapseButton] =
+       settings_api::PrefType::kBoolean;
+   (*s_allowlist)[::prefs::kShowDynamicNewTabButton] =
++      settings_api::PrefType::kBoolean;
++  (*s_allowlist)[::prefs::kShowToolbarBookmarks] =
+       settings_api::PrefType::kBoolean;
+ 
+   // Appearance settings.
+--- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_toolbar/customize_toolbar.mojom
++++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_toolbar/customize_toolbar.mojom
+@@ -20,6 +20,7 @@ enum ActionId {
+   kReload,
+   kVerticalTabsCollapse,
+   kDynamicNewTab,
++  kToolbarBookmarks,
+   kAvatar,
+   kExtensions,
+   kMenu,
+--- a/chrome/browser/ui/webui/side_panel/customize_chrome/customize_toolbar/customize_toolbar_handler.cc
++++ b/chrome/browser/ui/webui/side_panel/customize_chrome/customize_toolbar/customize_toolbar_handler.cc
+@@ -59,6 +59,8 @@ MojoActionForChromeAction(actions::Actio
+           kVerticalTabsCollapse;
+     case kActionNewTab:
+       return side_panel::customize_chrome::mojom::ActionId::kDynamicNewTab;
++    case kActionShowBookmarkBar:
++      return side_panel::customize_chrome::mojom::ActionId::kToolbarBookmarks;
+     case kActionAvatar:
+       return side_panel::customize_chrome::mojom::ActionId::kAvatar;
+     case kActionExtensions:
+@@ -124,6 +126,8 @@ std::optional<actions::ActionId> ChromeA
+       return kActionToggleCollapseVertical;
+     case side_panel::customize_chrome::mojom::ActionId::kDynamicNewTab:
+       return kActionNewTab;
++    case side_panel::customize_chrome::mojom::ActionId::kToolbarBookmarks:
++      return kActionShowBookmarkBar;
+     case side_panel::customize_chrome::mojom::ActionId::kAvatar:
+       return kActionAvatar;
+     case side_panel::customize_chrome::mojom::ActionId::kExtensions:
+@@ -218,6 +222,11 @@ CustomizeToolbarHandler::CustomizeToolba
+                           base::Unretained(this), kActionNewTab,
+                           prefs::kShowDynamicNewTabButton));
+   pref_change_registrar_.Add(
++      prefs::kShowToolbarBookmarks,
++      base::BindRepeating(&CustomizeToolbarHandler::OnActionPinnedChanged,
++                          base::Unretained(this), kActionShowBookmarkBar,
++                          prefs::kShowToolbarBookmarks));
++  pref_change_registrar_.Add(
+       prefs::kShowAvatarButton,
+       base::BindRepeating(&CustomizeToolbarHandler::OnActionPinnedChanged,
+                           base::Unretained(this), kActionAvatar,
+@@ -339,6 +348,22 @@ void CustomizeToolbarHandler::ListAction
+                   .Rasterize(&provider),
+               scale_factor)));
+ 
++  auto toolbar_bookmarks_action =
++      side_panel::customize_chrome::mojom::Action::New(
++          MojoActionForChromeAction(kActionShowBookmarkBar).value(),
++          base::UTF16ToUTF8(
++              l10n_util::GetStringUTF16(IDS_BOOKMARK_BAR_FOLDER_NAME)),
++          prefs()->GetBoolean(prefs::kShowToolbarBookmarks), false,
++          side_panel::customize_chrome::mojom::CategoryId::kYourChrome,
++          GURL(webui::EncodePNGAndMakeDataURI(
++              ui::ImageModel::FromVectorIcon(
++                  features::IsRoundedIconsEnabled()
++                      ? kToolbarIcon
++                      : kToolbarChromeRefreshOldIcon,
++                  icon_color_id)
++                  .Rasterize(&provider),
++              scale_factor)));
++
+   auto avatar_action = side_panel::customize_chrome::mojom::Action::New(
+       MojoActionForChromeAction(kActionAvatar).value(),
+       base::UTF16ToUTF8(l10n_util::GetStringUTF16(IDS_PROFILES_MENU_NAME)),
+@@ -418,6 +443,7 @@ void CustomizeToolbarHandler::ListAction
+   actions.push_back(std::move(vertical_tabs_collapse_action));
+   actions.push_back(std::move(dynamic_new_tab_action));
+ 
++  actions.push_back(std::move(toolbar_bookmarks_action));
+   actions.push_back(std::move(extensions_action));
+   actions.push_back(std::move(media_controls_action));
+   actions.push_back(std::move(avatar_action));
+@@ -568,6 +594,9 @@ void CustomizeToolbarHandler::PinAction(
+     case kActionNewTab:
+       prefs()->SetBoolean(prefs::kShowDynamicNewTabButton, pin);
+       break;
++    case kActionShowBookmarkBar:
++      prefs()->SetBoolean(prefs::kShowToolbarBookmarks, pin);
++      break;
+     case kActionAvatar:
+       prefs()->SetBoolean(prefs::kShowAvatarButton, pin);
+       break;
+--- a/chrome/browser/ui/views/bookmarks/bookmark_menu_controller_views.h
++++ b/chrome/browser/ui/views/bookmarks/bookmark_menu_controller_views.h
+@@ -27,6 +27,7 @@ class MenuButton;
+ 
+ namespace views {
+ class MenuButton;
++class MenuButtonController;
+ class MenuItemView;
+ class MenuRunner;
+ class Widget;
+@@ -52,6 +53,11 @@ class BookmarkMenuController : public Bo
+ 
+   void RunMenuAt(BookmarkBarView* bookmark_bar);
+ 
++  // Shows the menu anchored to `anchor_view`, outside of the bookmark bar.
++  void RunMenuAt(views::View* anchor_view,
++                 views::MenuButtonController* button_controller,
++                 views::MenuAnchorPosition anchor);
++
+   void clear_bookmark_bar() { bookmark_bar_ = nullptr; }
+ 
+   // Hides the menu.
+--- a/chrome/browser/ui/views/bookmarks/bookmark_menu_controller_views.cc
++++ b/chrome/browser/ui/views/bookmarks/bookmark_menu_controller_views.cc
+@@ -59,16 +59,22 @@ void BookmarkMenuController::RunMenuAt(B
+   DCHECK(menu_button);
+   views::MenuAnchorPosition anchor;
+   bookmark_bar_->GetAnchorPositionForButton(menu_button, &anchor);
++  RunMenuAt(menu_button, menu_button->button_controller(), anchor);
++}
++
++void BookmarkMenuController::RunMenuAt(
++    views::View* anchor_view,
++    views::MenuButtonController* button_controller,
++    views::MenuAnchorPosition anchor) {
+   gfx::Point screen_loc;
+-  views::View::ConvertPointToScreen(menu_button, &screen_loc);
+-  gfx::Rect bounds(screen_loc.x(), screen_loc.y(), menu_button->width(),
+-                   menu_button->height());
++  views::View::ConvertPointToScreen(anchor_view, &screen_loc);
++  gfx::Rect bounds(screen_loc.x(), screen_loc.y(), anchor_view->width(),
++                   anchor_view->height());
+   menu_delegate_->GetBookmarkMergedSurfaceService()->AddObserver(this);
+   // We only delete ourself after the menu completes, so we can safely ignore
+   // the return value.
+-  menu_runner_->RunMenuAt(menu_delegate_->parent(),
+-                          menu_button->button_controller(), bounds, anchor,
+-                          ui::mojom::MenuSourceType::kNone);
++  menu_runner_->RunMenuAt(menu_delegate_->parent(), button_controller, bounds,
++                          anchor, ui::mojom::MenuSourceType::kNone);
+ }
+ 
+ void BookmarkMenuController::Cancel() {
+--- a/chrome/browser/ui/views/toolbar/BUILD.gn
++++ b/chrome/browser/ui/views/toolbar/BUILD.gn
+@@ -34,6 +34,7 @@ source_set("toolbar") {
+     "toolbar_action_hover_card_bubble_view.h",
+     "toolbar_action_hover_card_controller.h",
+     "toolbar_action_view.h",
++    "toolbar_bookmarks_container.h",
+     "toolbar_button.h",
+     "toolbar_button_menu_highlighter.h",
+     "toolbar_chip_button.h",
+@@ -140,6 +141,7 @@ source_set("impl") {
+     "toolbar_action_hover_card_bubble_view.cc",
+     "toolbar_action_hover_card_controller.cc",
+     "toolbar_action_view.cc",
++    "toolbar_bookmarks_container.cc",
+     "toolbar_button.cc",
+     "toolbar_button_menu_highlighter.cc",
+     "toolbar_chip_button.cc",
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.h
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.h
+@@ -67,6 +67,7 @@ class TabStripRegionView;
+ class OverflowButton;
+ class PerformanceInterventionButton;
+ class TabStripRegionView;
++class ToolbarBookmarksContainer;
+ 
+ namespace views {
+ class FlexLayout;
+@@ -464,6 +465,7 @@ class ToolbarView : public views::Access
+   raw_ptr<PinnedToolbarActions> pinned_toolbar_actions_ = nullptr;
+   raw_ptr<AvatarToolbarButton> avatar_ = nullptr;
+   raw_ptr<ToolbarButton> dynamic_new_tab_button_ = nullptr;
++  raw_ptr<ToolbarBookmarksContainer> bookmarks_container_ = nullptr;
+   raw_ptr<MediaToolbarButton> media_button_ = nullptr;
+   raw_ptr<BrowserAppMenuButton> app_menu_button_ = nullptr;
+   raw_ptr<TabStripRegionView> tab_strip_region_view_ = nullptr;
+@@ -520,6 +522,8 @@ class ToolbarView : public views::Access
+ 
+   BooleanPrefMember show_dynamic_new_tab_button_;
+ 
++  BooleanPrefMember show_toolbar_bookmarks_;
++
+   BooleanPrefMember show_avatar_button_;
+ 
+   BooleanPrefMember show_extensions_button_;
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -110,6 +110,7 @@
+ #include "chrome/browser/ui/views/toolbar/pinned_toolbar_actions_container.h"
+ #include "chrome/browser/ui/views/toolbar/reload_button.h"
+ #include "chrome/browser/ui/views/toolbar/split_tabs_button.h"
++#include "chrome/browser/ui/views/toolbar/toolbar_bookmarks_container.h"
+ #include "chrome/browser/ui/views/toolbar/toolbar_button.h"
+ #include "chrome/browser/ui/views/toolbar/toolbar_controller.h"
+ #include "chrome/browser/ui/views/toolbar/toolbar_divider.h"
+@@ -199,7 +200,8 @@ constexpr int kToolbarFlexOrderOffset =
+ constexpr int kLocationBarFlexOrder = kToolbarFlexOrderOffset + 1;
+ constexpr int kToolbarActionsFlexOrder = kToolbarFlexOrderOffset + 2;
+ constexpr int kExtensionsFlexOrder = kToolbarFlexOrderOffset + 3;
+-constexpr int kTabStripFlexOrder = kToolbarFlexOrderOffset + 4;
++constexpr int kBookmarksFlexOrder = kToolbarFlexOrderOffset + 4;
++constexpr int kTabStripFlexOrder = kToolbarFlexOrderOffset + 5;
+ 
+ constexpr int kDynamicNewTabButtonIconSize = 16;
+ 
+@@ -700,6 +702,11 @@ void ToolbarView::Init() {
+   dynamic_new_tab_button_->SetProperty(views::kElementIdentifierKey,
+                                        kToolbarDynamicNewTabButtonElementId);
+ 
++  if (display_mode_ == DisplayMode::kNormal) {
++    bookmarks_container_ =
++        AddChildView(std::make_unique<ToolbarBookmarksContainer>(browser_));
++  }
++
+   if (extensions_container) {
+     extensions_container_ = AddChildView(std::move(extensions_container));
+     extensions_toolbar_coordinator_ =
+@@ -888,6 +895,11 @@ void ToolbarView::Init() {
+       base::BindRepeating(&ToolbarView::UpdateToolbarLayout,
+                           base::Unretained(this)));
+ 
++  show_toolbar_bookmarks_.Init(
++      prefs::kShowToolbarBookmarks, prefs,
++      base::BindRepeating(&ToolbarView::UpdateToolbarLayout,
++                          base::Unretained(this)));
++
+   show_avatar_button_.Init(
+       prefs::kShowAvatarButton, prefs,
+       base::BindRepeating(&ToolbarView::OnShowAvatarButtonChanged,
+@@ -2240,6 +2252,16 @@ void ToolbarView::UpdateToolbarLayout()
+     }
+   }
+ 
++  // Bookmarks drop out first, but keep priority over tabs in compact layout
++  // like the other toolbar items.
++  if (bookmarks_container_) {
++    bookmarks_container_->SetVisible(show_toolbar_bookmarks_.GetValue());
++    bookmarks_container_->SetProperty(
++        views::kFlexBehaviorKey,
++        views::FlexSpecification(bookmarks_container_->GetFlexRule())
++            .WithOrder(kBookmarksFlexOrder));
++  }
++
+   InvalidateLayout();
+ }
+ 
+--- /dev/null
++++ b/chrome/browser/ui/views/toolbar/toolbar_bookmarks_container.h
+@@ -0,0 +1,92 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_TOOLBAR_TOOLBAR_BOOKMARKS_CONTAINER_H_
++#define CHROME_BROWSER_UI_VIEWS_TOOLBAR_TOOLBAR_BOOKMARKS_CONTAINER_H_
++
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
++#include "chrome/browser/bookmarks/bookmark_merged_surface_service.h"
++#include "chrome/browser/bookmarks/bookmark_merged_surface_service_observer.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/views/context_menu_controller.h"
++#include "ui/views/layout/flex_layout_types.h"
++#include "ui/views/view.h"
++
++class BookmarkContextMenu;
++class BrowserWindowInterface;
++
++namespace bookmarks {
++class BookmarkNode;
++}
++
++namespace views {
++class Button;
++class FlexLayout;
++}
++
++// Shows the bookmarks bar items as icon-only buttons in the toolbar. Folders
++// open the bookmark menu. Trailing items are dropped when out of room.
++class ToolbarBookmarksContainer : public views::View,
++                                  public views::ContextMenuController,
++                                  public BookmarkMergedSurfaceServiceObserver {
++  METADATA_HEADER(ToolbarBookmarksContainer, views::View)
++
++ public:
++  explicit ToolbarBookmarksContainer(BrowserWindowInterface* browser);
++  ToolbarBookmarksContainer(const ToolbarBookmarksContainer&) = delete;
++  ToolbarBookmarksContainer& operator=(const ToolbarBookmarksContainer&) =
++      delete;
++  ~ToolbarBookmarksContainer() override;
++
++  // Flex rule for the toolbar that shrinks by dropping trailing items.
++  views::FlexRule GetFlexRule() const;
++
++  // BookmarkMergedSurfaceServiceObserver:
++  void BookmarkMergedSurfaceServiceLoaded() override;
++  void BookmarkNodeAdded(const BookmarkParentFolder& parent,
++                         size_t index) override;
++  void BookmarkNodesRemoved(
++      const BookmarkParentFolder& parent,
++      const base::flat_set<const bookmarks::BookmarkNode*>& nodes) override;
++  void BookmarkNodeMoved(const BookmarkParentFolder& old_parent,
++                         size_t old_index,
++                         const BookmarkParentFolder& new_parent,
++                         size_t new_index) override;
++  void BookmarkNodeChanged(const bookmarks::BookmarkNode* node) override;
++  void BookmarkNodeFaviconChanged(const bookmarks::BookmarkNode* node) override;
++  void BookmarkParentFolderChildrenReordered(
++      const BookmarkParentFolder& folder) override;
++  void BookmarkAllUserNodesRemoved() override;
++
++ private:
++  // views::ContextMenuController:
++  void ShowContextMenuForViewImpl(
++      views::View* source,
++      const gfx::Point& point,
++      ui::mojom::MenuSourceType source_type) override;
++
++  void Rebuild();
++  void RebuildIfBar(const BookmarkParentFolder& folder);
++  void RebuildIfInBar(const bookmarks::BookmarkNode* node);
++  std::unique_ptr<views::Button> CreateButton(
++      const bookmarks::BookmarkNode* node);
++  void OpenBookmark(const bookmarks::BookmarkNode* node,
++                    const ui::Event& event);
++  void ShowFolderMenu(views::Button* button,
++                      const bookmarks::BookmarkNode* folder);
++
++  const raw_ptr<BrowserWindowInterface> browser_;
++  const raw_ptr<BookmarkMergedSurfaceService> service_;
++  raw_ptr<views::FlexLayout> layout_ = nullptr;
++  std::unique_ptr<BookmarkContextMenu> context_menu_;
++
++  base::ScopedObservation<BookmarkMergedSurfaceService,
++                          BookmarkMergedSurfaceServiceObserver>
++      service_observation_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_TOOLBAR_TOOLBAR_BOOKMARKS_CONTAINER_H_
+--- /dev/null
++++ b/chrome/browser/ui/views/toolbar/toolbar_bookmarks_container.cc
+@@ -0,0 +1,228 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/views/toolbar/toolbar_bookmarks_container.h"
++
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/bookmarks/bookmark_merged_surface_service_factory.h"
++#include "chrome/browser/bookmarks/bookmark_parent_folder.h"
++#include "chrome/browser/favicon/favicon_utils.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/bookmarks/bookmark_stats.h"
++#include "chrome/browser/ui/bookmarks/bookmark_utils.h"
++#include "chrome/browser/ui/bookmarks/bookmark_utils_desktop.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/color/chrome_color_id.h"
++#include "chrome/browser/ui/layout_constants.h"
++#include "chrome/browser/ui/views/bookmarks/bookmark_context_menu.h"
++#include "chrome/browser/ui/views/bookmarks/bookmark_menu_controller_views.h"
++#include "chrome/browser/ui/views/toolbar/toolbar_button.h"
++#include "components/bookmarks/browser/bookmark_model.h"
++#include "components/bookmarks/browser/bookmark_node.h"
++#include "components/strings/grit/components_strings.h"
++#include "ui/accessibility/ax_enums.mojom.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/base/window_open_disposition_utils.h"
++#include "ui/events/event.h"
++#include "ui/views/accessibility/view_accessibility.h"
++#include "ui/views/controls/button/menu_button_controller.h"
++#include "ui/views/controls/menu/menu_types.h"
++#include "ui/views/layout/flex_layout.h"
++#include "ui/views/view_class_properties.h"
++
++using bookmarks::BookmarkNode;
++
++ToolbarBookmarksContainer::ToolbarBookmarksContainer(
++    BrowserWindowInterface* browser)
++    : browser_(browser),
++      service_(BookmarkMergedSurfaceServiceFactory::GetForProfile(
++          browser->GetProfile())) {
++  layout_ = SetLayoutManager(std::make_unique<views::FlexLayout>());
++  layout_->SetCrossAxisAlignment(views::LayoutAlignment::kCenter)
++      .SetCollapseMargins(true)
++      .SetIgnoreDefaultMainAxisMargins(true)
++      .SetDefault(views::kMarginsKey,
++                  gfx::Insets::VH(0, GetLayoutConstant(
++                                         LayoutConstant::kToolbarElementPadding)))
++      .SetDefault(views::kFlexBehaviorKey,
++                  views::FlexSpecification(
++                      views::MinimumFlexSizeRule::kPreferredSnapToZero,
++                      views::MaximumFlexSizeRule::kPreferred));
++
++  GetViewAccessibility().SetRole(ax::mojom::Role::kGroup);
++  GetViewAccessibility().SetName(
++      l10n_util::GetStringUTF16(IDS_BOOKMARK_BAR_FOLDER_NAME));
++
++  if (service_) {
++    service_observation_.Observe(service_.get());
++    if (service_->loaded()) {
++      Rebuild();
++    }
++  }
++}
++
++ToolbarBookmarksContainer::~ToolbarBookmarksContainer() = default;
++
++views::FlexRule ToolbarBookmarksContainer::GetFlexRule() const {
++  return layout_->GetDefaultFlexRule();
++}
++
++void ToolbarBookmarksContainer::BookmarkMergedSurfaceServiceLoaded() {
++  Rebuild();
++}
++
++void ToolbarBookmarksContainer::BookmarkNodeAdded(
++    const BookmarkParentFolder& parent,
++    size_t index) {
++  RebuildIfBar(parent);
++}
++
++void ToolbarBookmarksContainer::BookmarkNodesRemoved(
++    const BookmarkParentFolder& parent,
++    const base::flat_set<const BookmarkNode*>& nodes) {
++  RebuildIfBar(parent);
++}
++
++void ToolbarBookmarksContainer::BookmarkNodeMoved(
++    const BookmarkParentFolder& old_parent,
++    size_t old_index,
++    const BookmarkParentFolder& new_parent,
++    size_t new_index) {
++  if (old_parent == BookmarkParentFolder::BookmarkBarFolder() ||
++      new_parent == BookmarkParentFolder::BookmarkBarFolder()) {
++    Rebuild();
++  }
++}
++
++void ToolbarBookmarksContainer::BookmarkNodeChanged(const BookmarkNode* node) {
++  RebuildIfInBar(node);
++}
++
++void ToolbarBookmarksContainer::BookmarkNodeFaviconChanged(
++    const BookmarkNode* node) {
++  RebuildIfInBar(node);
++}
++
++void ToolbarBookmarksContainer::BookmarkParentFolderChildrenReordered(
++    const BookmarkParentFolder& folder) {
++  RebuildIfBar(folder);
++}
++
++void ToolbarBookmarksContainer::BookmarkAllUserNodesRemoved() {
++  Rebuild();
++}
++
++void ToolbarBookmarksContainer::ShowContextMenuForViewImpl(
++    views::View* source,
++    const gfx::Point& point,
++    ui::mojom::MenuSourceType source_type) {
++  // Buttons are the only children, in bookmarks bar order.
++  const std::optional<size_t> index = GetIndexOf(source);
++  if (!index) {
++    return;
++  }
++
++  const std::vector<raw_ptr<const BookmarkNode, VectorExperimental>> nodes = {
++      service_->GetNodeAtIndex(BookmarkParentFolder::BookmarkBarFolder(),
++                               *index)};
++  // ponytail: paste stays disabled; enabling it needs the async clipboard
++  // check from BookmarkBarView::ShowContextMenuForViewImpl.
++  context_menu_ = std::make_unique<BookmarkContextMenu>(
++      GetWidget(), browser_, browser_->GetProfile(),
++      BookmarkLaunchLocation::kAttachedBar, nodes, /*close_on_remove=*/true,
++      /*can_paste=*/false);
++  context_menu_->RunMenuAt(point, source_type);
++}
++
++void ToolbarBookmarksContainer::Rebuild() {
++  // ponytail: rebuilds every button on any bookmarks bar change, update
++  // single buttons if bars with many items make this slow.
++  RemoveAllChildViews();
++  const BookmarkParentFolder bar = BookmarkParentFolder::BookmarkBarFolder();
++  for (size_t i = 0; i < service_->GetChildrenCount(bar); ++i) {
++    AddChildView(CreateButton(service_->GetNodeAtIndex(bar, i)));
++  }
++  PreferredSizeChanged();
++}
++
++void ToolbarBookmarksContainer::RebuildIfBar(
++    const BookmarkParentFolder& folder) {
++  if (folder == BookmarkParentFolder::BookmarkBarFolder()) {
++    Rebuild();
++  }
++}
++
++void ToolbarBookmarksContainer::RebuildIfInBar(const BookmarkNode* node) {
++  if (BookmarkParentFolder::BookmarkBarFolder().HasDirectChildNode(node)) {
++    Rebuild();
++  }
++}
++
++std::unique_ptr<views::Button> ToolbarBookmarksContainer::CreateButton(
++    const BookmarkNode* node) {
++  auto button = std::make_unique<ToolbarButton>();
++  if (node->is_url()) {
++    button->SetCallback(
++        base::BindRepeating(&ToolbarBookmarksContainer::OpenBookmark,
++                            base::Unretained(this), node));
++    button->SetTriggerableEventFlags(ui::EF_LEFT_MOUSE_BUTTON |
++                                     ui::EF_MIDDLE_MOUSE_BUTTON);
++    const gfx::Image& favicon = service_->bookmark_model()->GetFavicon(node);
++    button->SetImageModel(views::Button::STATE_NORMAL,
++                          favicon.IsEmpty()
++                              ? favicon::GetDefaultFaviconModel(kColorToolbar)
++                              : ui::ImageModel::FromImage(favicon));
++  } else {
++    button->SetButtonController(std::make_unique<views::MenuButtonController>(
++        button.get(),
++        base::BindRepeating(&ToolbarBookmarksContainer::ShowFolderMenu,
++                            base::Unretained(this), button.get(), node),
++        std::make_unique<views::Button::DefaultButtonControllerDelegate>(
++            button.get())));
++    button->SetImageModel(
++        views::Button::STATE_NORMAL,
++        chrome::GetBookmarkFolderIcon(chrome::BookmarkFolderIconType::kNormal,
++                                      kColorToolbarButtonIcon));
++  }
++
++  const std::u16string title =
++      node->GetTitle().empty() ? base::UTF8ToUTF16(node->url().spec())
++                               : std::u16string(node->GetTitle());
++  button->SetTooltipText(title);
++  button->GetViewAccessibility().SetName(title);
++
++  const int size = GetLayoutConstant(LayoutConstant::kToolbarButtonHeight);
++  button->SetPreferredSize(gfx::Size(size, size));
++  button->SetHorizontalAlignment(gfx::ALIGN_CENTER);
++  button->SetFlipCanvasOnPaintForRTLUI(false);
++  button->set_context_menu_controller(this);
++  return button;
++}
++
++void ToolbarBookmarksContainer::OpenBookmark(const BookmarkNode* node,
++                                             const ui::Event& event) {
++  bookmarks::OpenAllIfAllowed(browser_, {node},
++                              ui::DispositionFromEventFlags(event.flags()));
++}
++
++void ToolbarBookmarksContainer::ShowFolderMenu(views::Button* button,
++                                               const BookmarkNode* folder) {
++  // Deletes itself when the menu closes.
++  auto* menu = new BookmarkMenuController(
++      browser_, GetWidget(), BookmarkParentFolder::FromFolderNode(folder),
++      /*start_child_index=*/0, /*for_drop=*/false);
++  menu->RunMenuAt(
++      button,
++      static_cast<views::MenuButtonController*>(button->button_controller()),
++      views::MenuAnchorPosition::kTopRight);
++}
++
++BEGIN_METADATA(ToolbarBookmarksContainer)
++END_METADATA
