@@ -1,0 +1,880 @@
+--- a/chrome/browser/helium_flag_choices.h
++++ b/chrome/browser/helium_flag_choices.h
+@@ -49,6 +49,8 @@ constexpr const char kHeliumNativeFrameM
+     "helium-native-frame-materials";
+ constexpr const char kHeliumHidePageActionsCommandLine[] =
+     "helium-hide-page-actions";
++
++constexpr const char kHeliumUltraCompactCommandLine[] = "helium-ultra-compact";
+ }  // namespace helium
+ 
+ #endif /* CHROME_BROWSER_HELIUM_FLAG_CHOICES_H_ */
+--- a/chrome/browser/helium_flag_entries.h
++++ b/chrome/browser/helium_flag_entries.h
+@@ -88,5 +88,9 @@
+      "Tints the browser frame and toolbar with the color of the current "
+      "page. Helium flag.",
+      kOsDesktop, FEATURE_VALUE_TYPE(features::kHeliumAdaptiveTabColor)},
++    {helium::kHeliumUltraCompactCommandLine, "Ultra compact",
++     "Turns the active tab into the address bar in the compact browser "
++     "layout. Helium flag.",
++     kOsDesktop, FEATURE_VALUE_TYPE(features::kHeliumUltraCompact)},
+     // platform
+ #endif  // CHROME_BROWSER_HELIUM_FLAG_ENTRIES_H_
+--- a/chrome/browser/ui/ui_features.h
++++ b/chrome/browser/ui/ui_features.h
+@@ -29,6 +29,8 @@ BASE_DECLARE_FEATURE_PARAM(double, kHeli
+ BASE_DECLARE_FEATURE(kHeliumNativeFrameMaterials);
+ bool HeliumNativeFrameAvailable();
+ 
++BASE_DECLARE_FEATURE(kHeliumUltraCompact);
++
+ BASE_DECLARE_FEATURE(kHeliumHidePageActions);
+ 
+ BASE_DECLARE_FEATURE(kAllowEyeDropperWGCScreenCapture);
+--- a/chrome/browser/ui/ui_features.cc
++++ b/chrome/browser/ui/ui_features.cc
+@@ -54,6 +54,9 @@ bool HeliumNativeFrameAvailable() {
+ #endif
+ }
+ 
++// Merges the location bar into the active tab in compact layout
++BASE_FEATURE(kHeliumUltraCompact, base::FEATURE_DISABLED_BY_DEFAULT);
++
+ // Enables the use of WGC for the Eye Dropper screen capture.
+ BASE_FEATURE(kAllowEyeDropperWGCScreenCapture,
+ #if BUILDFLAG(IS_WIN)
+--- a/chrome/browser/ui/helium/BUILD.gn
++++ b/chrome/browser/ui/helium/BUILD.gn
+@@ -15,6 +15,7 @@ source_set("helium_layout_state_controll
+     "//ui/base/unowned_user_data",
+   ]
+   deps = [
++    "//chrome/browser/ui:ui_features",
+     "//chrome/browser/ui/browser_window",
+     "//chrome/common:constants",
+   ]
+--- a/chrome/browser/ui/helium/helium_layout_state_controller.h
++++ b/chrome/browser/ui/helium/helium_layout_state_controller.h
+@@ -41,6 +41,9 @@ class HeliumLayoutStateController {
+   bool IsDynamicLayout() const;
+   bool IsZenModeEnabled() const;
+ 
++  // Compact layout with the active tab acting as the location bar.
++  bool IsUltraCompactLayout() const;
++
+   void SetBrowserLayout(HeliumLayoutType layout);
+   HeliumLayoutType GetBrowserLayout() const;
+ 
+--- a/chrome/browser/ui/helium/helium_layout_state_controller.cc
++++ b/chrome/browser/ui/helium/helium_layout_state_controller.cc
+@@ -6,8 +6,10 @@
+ 
+ #include <utility>
+ 
++#include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/ui_features.h"
+ #include "chrome/common/pref_names.h"
+ #include "components/prefs/pref_service.h"
+ 
+@@ -51,6 +53,11 @@ bool HeliumLayoutStateController::IsDyna
+   return GetBrowserLayout() == HeliumLayoutType::kDynamic;
+ }
+ 
++bool HeliumLayoutStateController::IsUltraCompactLayout() const {
++  return IsCompactLayout() &&
++         base::FeatureList::IsEnabled(features::kHeliumUltraCompact);
++}
++
+ bool HeliumLayoutStateController::IsZenModeEnabled() const {
+   return pref_service_->GetBoolean(prefs::kHeliumZenMode);
+ }
+--- a/chrome/browser/ui/views/tabs/tab_container_controller.h
++++ b/chrome/browser/ui/views/tabs/tab_container_controller.h
+@@ -87,6 +87,11 @@ class TabContainerController {
+   virtual void UpdateAnimationTarget(
+       TabSlotView* tab_slot_view,
+       gfx::Rect target_bounds_in_tab_container_coords) = 0;
++
++  // Returns the fixed width of the active tab, if it hosts the location bar.
++  virtual std::optional<int> GetActiveTabWidthOverride() const {
++    return std::nullopt;
++  }
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_TABS_TAB_CONTAINER_CONTROLLER_H_
+--- a/chrome/browser/ui/views/tabs/tab_slot_controller.h
++++ b/chrome/browser/ui/views/tabs/tab_slot_controller.h
+@@ -126,6 +126,12 @@ class TabSlotController {
+   // Returns whether `tab` is the active tab. The active tab is the one whose
+   // content is shown in the browser.
+   virtual bool IsActiveTab(const TabSlotView* tab) const = 0;
++
++  // Returns whether `tab` is covered by the location bar, in which case it
++  // should not paint itself or its children.
++  virtual bool IsTabCoveredByLocationBar(const TabSlotView* tab) const {
++    return false;
++  }
+ 
+   // Returns whether `tab` is selected.
+   virtual bool IsTabSelected(const TabSlotView* tab) const = 0;
+--- a/chrome/browser/ui/views/tabs/tab_strip.h
++++ b/chrome/browser/ui/views/tabs/tab_strip.h
+@@ -231,6 +231,10 @@ class TabStrip : public views::View,
+   // The browser window interface for the hosting browser.
+   BrowserWindowInterface* GetBrowserWindowInterface() const;
+ 
++  // Gives the active tab a fixed `width` so the location bar can cover it, or
++  // restores normal tab sizing when `width` is nullopt.
++  void SetActiveTabWidthOverride(std::optional<int> width);
++
+   // TabContainerController:
+   bool IsValidModelIndex(int index) const override;
+   std::optional<int> GetActiveIndex() const override;
+@@ -248,6 +252,7 @@ class TabStrip : public views::View,
+       TabSlotView* tab_slot_view,
+       gfx::Rect target_bounds_in_tab_container_coords) override;
+   std::optional<tab_groups::TabGroupId> GetFocusedGroup() const override;
++  std::optional<int> GetActiveTabWidthOverride() const override;
+ 
+   // TabContainerController AND TabSlotController:
+   bool IsGroupCollapsed(const tab_groups::TabGroupId& group) const override;
+@@ -277,6 +282,7 @@ class TabStrip : public views::View,
+   void TabKeyboardFocusChangedTo(const tabs::TabInterface* tab) override;
+   int GetTabCount() const override;
+   bool IsActiveTab(const TabSlotView* tab) const override;
++  bool IsTabCoveredByLocationBar(const TabSlotView* tab) const override;
+   bool IsTabSelected(const TabSlotView* tab) const override;
+   bool IsFocusInTabStrip() const override;
+ 
+@@ -421,6 +427,9 @@ class TabStrip : public views::View,
+   // The View parent for the tabs and the various group views.
+   raw_ptr<TabContainer, AcrossTasksDanglingUntriaged> tab_container_;
+ 
++  // Fixed width of the active tab while it hosts the location bar.
++  std::optional<int> active_tab_width_override_;
++
+   // Location of the mouse at the time of the last move.
+   gfx::Point last_mouse_move_location_;
+ 
+--- a/chrome/browser/ui/views/tabs/tab_strip.cc
++++ b/chrome/browser/ui/views/tabs/tab_strip.cc
+@@ -1613,7 +1613,30 @@ void TabStrip::StopAnimating() {
+ void TabStrip::StopAnimating() {
+   tab_container_->CompleteAnimationAndLayout();
+ }
++
++void TabStrip::SetActiveTabWidthOverride(std::optional<int> width) {
++  if (active_tab_width_override_ == width) {
++    return;
++  }
+ 
++  active_tab_width_override_ = width;
++  // The active tab hides or restores its contents even if its width is equal.
++  if (const std::optional<int> active_index = GetActiveIndex();
++      active_index && *active_index < GetTabCount()) {
++    tab_at(*active_index)->InvalidateLayout();
++    tab_at(*active_index)->SchedulePaint();
++  }
++  // Relayout lazily; this can run before the tab container is created.
++  if (tab_container_) {
++    tab_container_->InvalidateLayout();
++  }
++  PreferredSizeChanged();
++}
++
++std::optional<int> TabStrip::GetActiveTabWidthOverride() const {
++  return active_tab_width_override_;
++}
++
+ views::View* TabStrip::GetTabViewForPromoAnchor(int index_hint) {
+   return tab_at(std::clamp(index_hint, 0, GetTabCount() - 1));
+ }
+@@ -1923,6 +1946,10 @@ bool TabStrip::IsActiveTab(const TabSlot
+   std::optional<int> model_index = GetModelIndexOf(tab);
+   return model_index.has_value() &&
+          controller_->IsActiveTab(model_index.value());
++}
++
++bool TabStrip::IsTabCoveredByLocationBar(const TabSlotView* tab) const {
++  return active_tab_width_override_ && IsActiveTab(tab);
+ }
+ 
+ bool TabStrip::IsTabSelected(const TabSlotView* tab) const {
+--- a/chrome/browser/ui/views/tabs/tab_strip_layout_helper.cc
++++ b/chrome/browser/ui/views/tabs/tab_strip_layout_helper.cc
+@@ -10,6 +10,7 @@
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_style.h"
+ #include "chrome/browser/ui/tabs/tab_types.h"
+ #include "chrome/browser/ui/views/tabs/tab.h"
+ #include "chrome/browser/ui/views/tabs/tab_group_header.h"
+@@ -186,6 +187,13 @@ int TabStripLayoutHelper::CalculateMinim
+ }
+ 
+ int TabStripLayoutHelper::CalculateMinimumWidth() {
++  // Reserve room for the location bar only; inactive tabs that do not fit are
++  // hidden, as they are in the compact layout.
++  if (const std::optional<int> width =
++          controller_->GetActiveTabWidthOverride()) {
++    return *width;
++  }
++
+   auto [bounds, layout_domain] = CalculateIdealBounds(0);
+ 
+   return bounds.empty() ? 0 : bounds.back().right();
+@@ -277,6 +285,32 @@ TabStripLayoutHelper::CalculateIdealBoun
+     TabSizeInfo size_info = slots_[i].view->GetTabSizeInfo();
+ 
+     tab_widths.emplace_back(state, size_info);
++  }
++
++  // The active tab hosts the location bar at a fixed width. Inactive tabs
++  // shrink to their minimum first; only then does the active tab shrink, down
++  // to half its width so the location bar stays usable. Inactive tabs that
++  // still do not fit are hidden.
++  if (const std::optional<int> override_width =
++          controller_->GetActiveTabWidthOverride();
++      override_width && active_tab_slot_index) {
++    const int active_slot = *active_tab_slot_index;
++    int width = *override_width;
++    if (available_width) {
++      const float overlap = TabStyle::Get()->GetTabOverlap();
++      float others_width = 0;
++      for (int i = 0; i < static_cast<int>(tab_widths.size()); i++) {
++        if (i != active_slot) {
++          others_width += tab_widths[i].GetMinimumWidth() - overlap;
++        }
++      }
++      width = std::max(
++          *override_width / 2,
++          std::min(width, static_cast<int>(*available_width - others_width)));
++    }
++    tab_widths[active_slot] =
++        TabWidthConstraints(tab_widths[active_slot].get_state(),
++                            TabSizeInfo{width, width, width, width});
+   }
+ 
+   return CalculateTabBounds(tab_widths, available_width);
+--- a/chrome/browser/ui/views/tabs/tab_container_impl.cc
++++ b/chrome/browser/ui/views/tabs/tab_container_impl.cc
+@@ -195,9 +195,12 @@ void TabContainerImpl::RemoveTab(int mod
+ 
+   MarkZOrderCacheDirty();
+ 
+-  if (controller_->IsBrowserClosing()) {
++  if (controller_->IsBrowserClosing() ||
++      (was_active && controller_->GetActiveTabWidthOverride() &&
++       !tab->dragging())) {
+     // If all tabs are closing, we should not animated to tab close, but instead
+-    // immediately close tabs.
++    // immediately close tabs. The same goes for a tab covered by the location
++    // bar, which would otherwise reappear while animating closed.
+     OnTabCloseAnimationCompleted(tab);
+   } else {
+     StartRemoveTabAnimation(tab, model_index);
+@@ -238,11 +241,13 @@ void TabContainerImpl::SetActiveTab(std:
+   MarkZOrderCacheDirty();
+ 
+   if (layout_helper_->layout_domain() ==
+-      LayoutDomain::kInactiveWidthEqualsActiveWidth) {
++          LayoutDomain::kInactiveWidthEqualsActiveWidth &&
++      !controller_->GetActiveTabWidthOverride()) {
+     // When tabs are wide enough, selecting a new tab cannot change the
+     // ideal bounds, so only a repaint is necessary.
+     SchedulePaint();
+-  } else if (controller_->IsAnimatingInTabStrip() || IsDragSessionActive()) {
++  } else if (controller_->IsAnimatingInTabStrip() || IsDragSessionActive() ||
++             controller_->GetActiveTabWidthOverride()) {
+     // The selection change will have modified the ideal bounds of the tabs. We
+     // need to recompute and retarget the animation to these new bounds. Note:
+     // This is safe even if we're in the midst of mouse-based tab closure--we
+--- a/chrome/browser/ui/views/tabs/tab.cc
++++ b/chrome/browser/ui/views/tabs/tab.cc
+@@ -587,7 +587,8 @@ void Tab::Layout(PassKey) {
+   alert_indicator_button_->SetVisible(showing_alert_indicator_);
+ 
+   // Size the title to fill the remaining width and use all available height.
+-  bool show_title = ShouldRenderAsNormalTab();
++  bool show_title = ShouldRenderAsNormalTab() &&
++                    !controller_->IsTabCoveredByLocationBar(this);
+ 
+   if (features::IsTabStripDeclutterEnabled() && center_icon_) {
+     show_title = false;
+@@ -895,7 +896,9 @@ void Tab::OnPaint(gfx::Canvas* canvas) {
+ }
+ 
+ void Tab::OnPaint(gfx::Canvas* canvas) {
+-  tab_style_views()->PaintTab(canvas);
++  if (!controller_->IsTabCoveredByLocationBar(this)) {
++    tab_style_views()->PaintTab(canvas);
++  }
+ }
+ 
+ void Tab::AddedToWidget() {
+@@ -1265,8 +1268,10 @@ void Tab::UpdateIconVisibility() {
+   // When a tab is less than it's minimum inactive width its implied that its
+   // collapsed, but some favicon functionality can escape the bounds of the tab
+   // causing artifacts. Fix this by explicitly disabling the visibility of the
+-  // views in the tab if the width is such that it is collapsed.
+-  if (width() < tab_style()->GetMinimumInactiveWidth()) {
++  // views in the tab if the width is such that it is collapsed. The same goes
++  // for a tab covered by the location bar.
++  if (width() < tab_style()->GetMinimumInactiveWidth() ||
++      controller_->IsTabCoveredByLocationBar(this)) {
+     showing_icon_ = false;
+     showing_alert_indicator_ = false;
+     showing_close_button_ = false;
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.h
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.h
+@@ -318,6 +318,10 @@ class ToolbarView : public views::Access
+ 
+   // Returns whether the Helium layout is Compact.
+   bool IsCompactLayout() const;
++  // Returns whether the location bar covers the active tab.
++  bool IsUltraCompactLayout() const;
++  // Places the location bar over the active tab in ultra compact layout.
++  void UpdateUltraCompactLocationBarBounds();
+   bool IsDynamicLayout() const;
+   bool IsVerticalLayout() const;
+   bool IsVerticalTabsRightAligned() const;
+@@ -464,6 +468,10 @@ class ToolbarView : public views::Access
+   raw_ptr<BrowserAppMenuButton> app_menu_button_ = nullptr;
+   raw_ptr<TabStripRegionView> tab_strip_region_view_ = nullptr;
+ 
++  // Keeps the location bar on top of the active tab in ultra compact layout.
++  class ActiveTabObserver;
++  std::unique_ptr<ActiveTabObserver> active_tab_observer_;
++
+   // The button currently holding the lock to be shown/hidden.
+   raw_ptr<glic::GlicButtonInterface> locked_expansion_button_ = nullptr;
+   raw_ptr<GlicAndActorButtonsContainer> glic_actor_button_container_ = nullptr;
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -95,8 +95,10 @@
+ #include "chrome/browser/ui/views/profiles/avatar_toolbar_button.h"
+ #include "chrome/browser/ui/views/side_panel/side_panel.h"
+ #include "chrome/browser/ui/views/tabs/glic/glic_and_actor_buttons_container.h"
++#include "chrome/browser/ui/views/tabs/tab.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip_controller.h"
++#include "chrome/browser/ui/views/tabs/tab_style_views.h"
+ #include "chrome/browser/ui/views/toolbar/app_menu.h"
+ #include "chrome/browser/ui/views/toolbar/app_menu_control.h"
+ #include "chrome/browser/ui/views/toolbar/avatar_toolbar_button_interface.h"
+@@ -135,6 +137,7 @@
+ #include "components/send_tab_to_self/features.h"
+ #include "components/signin/public/base/signin_buildflags.h"
+ #include "components/strings/grit/components_strings.h"
++#include "components/tabs/public/tab_interface.h"
+ #include "components/vector_icons/vector_icons.h"
+ #include "content/public/browser/render_view_host.h"
+ #include "content/public/browser/web_contents.h"
+@@ -153,6 +156,8 @@
+ #include "ui/compositor/layer.h"
+ #include "ui/gfx/canvas.h"
+ #include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/image/canvas_image_source.h"
+ #include "ui/gfx/paint_vector_icon.h"
+ #include "ui/gfx/scoped_canvas.h"
+@@ -171,6 +176,7 @@
+ #include "ui/views/vector_icons.h"
+ #include "ui/views/view.h"
+ #include "ui/views/view_class_properties.h"
++#include "ui/views/view_observer.h"
+ #include "ui/views/view_utils.h"
+ #include "ui/views/widget/tooltip_manager.h"
+ #include "ui/views/widget/widget.h"
+@@ -358,6 +364,21 @@ class CenteredLocationBarLayout : public
+     ApplyLayout(layout);
+   }
+ 
++  std::vector<raw_ptr<views::View, VectorExperimental>>
++  GetChildViewsInPaintOrder(const views::View* host) const override {
++    auto children = FlexLayout::GetChildViewsInPaintOrder(host);
++    // A location bar placed over the active tab must paint and receive events
++    // above the tab strip.
++    if (location_bar_ &&
++        location_bar_->GetProperty(views::kViewIgnoredByLayoutKey)) {
++      auto it = std::ranges::find(children, location_bar_.get());
++      if (it != children.end()) {
++        std::rotate(it, it + 1, children.end());
++      }
++    }
++    return children;
++  }
++
+  private:
+   const raw_ptr<views::View> location_bar_;
+   GetCenteredBoundsCallback callback_;
+@@ -365,6 +386,36 @@ class CenteredLocationBarLayout : public
+ 
+ }  // namespace
+ 
++class ToolbarView::ActiveTabObserver : public views::ViewObserver {
++ public:
++  explicit ActiveTabObserver(ToolbarView* toolbar) : toolbar_(toolbar) {}
++  ActiveTabObserver(const ActiveTabObserver&) = delete;
++  ActiveTabObserver& operator=(const ActiveTabObserver&) = delete;
++  ~ActiveTabObserver() override = default;
++
++  void Observe(views::View* tab) {
++    if (observation_.GetSource() == tab) {
++      return;
++    }
++    observation_.Reset();
++    if (tab) {
++      observation_.Observe(tab);
++    }
++  }
++
++  // views::ViewObserver:
++  void OnViewBoundsChanged(views::View* observed_view) override {
++    toolbar_->UpdateUltraCompactLocationBarBounds();
++  }
++  void OnViewIsDeleting(views::View* observed_view) override {
++    observation_.Reset();
++  }
++
++ private:
++  const raw_ptr<ToolbarView> toolbar_;
++  base::ScopedObservation<views::View, views::ViewObserver> observation_{this};
++};
++
+ ////////////////////////////////////////////////////////////////////////////////
+ // ToolbarView, public:
+ 
+@@ -1425,6 +1476,9 @@ void ToolbarView::Update(WebContents* ta
+     reload_control->SetDevToolsStatus(
+         chrome::IsDebuggerAttachedToCurrentTab(browser_));
+   }
++
++  // The active tab may have changed.
++  UpdateUltraCompactLocationBarBounds();
+ }
+ 
+ bool ToolbarView::UpdateSecurityState() {
+@@ -1495,6 +1549,15 @@ bool ToolbarView::IsRectInWindowCaption(
+     return gfx::ToEnclosingRect(rect_in_target_coords_f);
+   };
+ 
++  // The location bar covers the active tab in ultra compact layout.
++  if (IsUltraCompactLayout()) {
++    const gfx::Rect location_bar_rect = get_target_rect(location_bar_view_);
++    if (location_bar_view_->GetLocalBounds().Intersects(location_bar_rect) &&
++        location_bar_view_->HitTestRect(location_bar_rect)) {
++      return false;
++    }
++  }
++
+   // Check the tab strip region first if compact layout is enabled.
+   if (IsCompactLayout() && tab_strip_region_view_) {
+     const gfx::Rect tab_strip_rect = get_target_rect(tab_strip_region_view_);
+@@ -1767,6 +1830,8 @@ void ToolbarView::Layout(PassKey) {
+   // Call super implementation to ensure layout manager and child layouts
+   // happen.
+   LayoutSuperclass<AccessiblePaneView>(this);
++
++  UpdateUltraCompactLocationBarBounds();
+ }
+ 
+ void ToolbarView::OnThemeChanged() {
+@@ -2096,10 +2161,14 @@ void ToolbarView::AttachTabStripRegionVi
+   tab_strip_region_view_->SetPaintToLayer();
+   tab_strip_region_view_->layer()->SetFillsBoundsOpaquely(false);
+   tab_strip_region_view_->layer()->SetMasksToBounds(true);
++  // In ultra compact layout the tab strip hosts the location bar, so it must
++  // keep room for it like the location bar does in compact layout.
+   tab_strip_region_view_->SetProperty(
+       views::kFlexBehaviorKey,
+       views::FlexSpecification(views::LayoutOrientation::kHorizontal,
+-                               views::MinimumFlexSizeRule::kScaleToZero,
++                               IsUltraCompactLayout()
++                                   ? views::MinimumFlexSizeRule::kScaleToMinimum
++                                   : views::MinimumFlexSizeRule::kScaleToZero,
+                                views::MaximumFlexSizeRule::kUnbounded)
+           .WithOrder(kTabStripFlexOrder));
+ 
+@@ -2124,10 +2193,27 @@ void ToolbarView::UpdateToolbarLayout()
+     }
+   }
+ 
++  if (tab_strip_region_view_) {
++    if (auto* tab_strip = views::AsViewClass<TabStrip>(
++            tab_strip_region_view_->GetTabStripView())) {
++      tab_strip->SetActiveTabWidthOverride(
++          IsUltraCompactLayout() ? std::make_optional(kPreferredCompactWidth)
++                                 : std::nullopt);
++    }
++  }
++
+   const int location_bar_margin =
+       GetLayoutConstant(LayoutConstant::kLocationBarMargin);
+   const bool is_compact_layout = IsCompactLayout();
+   if (location_bar_view_) {
++    // In ultra compact layout, the location bar is placed over the active tab
++    // after the flex layout runs.
++    if (location_bar_view_->GetProperty(views::kViewIgnoredByLayoutKey) !=
++        IsUltraCompactLayout()) {
++      location_bar_view_->SetProperty(views::kViewIgnoredByLayoutKey,
++                                      IsUltraCompactLayout());
++      ReorderLayers();
++    }
+     if (is_compact_layout) {
+       location_bar_view_->SetPreferredSize(gfx::Size(
+           kPreferredCompactWidth,
+@@ -2173,6 +2259,68 @@ bool ToolbarView::IsCompactLayout() cons
+   return controller && controller->IsCompactLayout();
+ }
+ 
++bool ToolbarView::IsUltraCompactLayout() const {
++  auto* controller =
++      HeliumLayoutStateController::From(browser_view_->browser());
++  return controller && controller->IsUltraCompactLayout() &&
++         display_mode_ == DisplayMode::kNormal && location_bar_view_ &&
++         tab_strip_region_view_ && tab_strip_region_view_->parent() == this;
++}
++
++void ToolbarView::UpdateUltraCompactLocationBarBounds() {
++  if (!location_bar_view_ ||
++      !location_bar_view_->GetProperty(views::kViewIgnoredByLayoutKey)) {
++    // Not reset: this may run from the observer's own callback.
++    if (active_tab_observer_) {
++      active_tab_observer_->Observe(nullptr);
++    }
++    return;
++  }
++
++  tabs::TabInterface* const active_tab = browser_->GetActiveTabInterface();
++  views::View* const tab_view =
++      active_tab
++          ? tab_strip_region_view_->GetTabAnchorView(active_tab->GetHandle())
++          : nullptr;
++  if (!active_tab_observer_) {
++    active_tab_observer_ = std::make_unique<ActiveTabObserver>(this);
++  }
++  active_tab_observer_->Observe(tab_view);
++
++  Tab* const tab = views::AsViewClass<Tab>(tab_view);
++  if (!tab || !tab->GetVisible()) {
++    // The active tab can be hidden, e.g. when it does not fit in the tab strip.
++    // Keep the location bar usable at the end of the tab strip, where hidden
++    // tabs would be.
++    const views::View* const tab_strip =
++        tab_strip_region_view_->GetTabStripView();
++    const int tab_strip_right =
++        tab_strip_region_view_->x() +
++        (tab_strip ? tab_strip->bounds().right()
++                   : tab_strip_region_view_->width());
++    const int location_bar_width =
++        std::min(tab_strip_right - tab_strip_region_view_->x(),
++                 kPreferredCompactWidth);
++    const int location_bar_height =
++        GetLayoutConstant(LayoutConstant::kLocationBarHeight);
++    location_bar_view_->SetBounds(tab_strip_right - location_bar_width,
++                                  (height() - location_bar_height) / 2,
++                                  location_bar_width, location_bar_height);
++    return;
++  }
++
++  // Cover the visible tab shape rather than the full tab bounds, which
++  // overlap the neighboring tabs.
++  gfx::RectF bounds = gfx::SkRectToRectF(
++      tab->tab_style_views()
++          ->GetPath(TabStyle::PathType::kHighlight, /*scale=*/1.0f,
++                    {.render_units = TabStyle::RenderUnits::kDips})
++          .getBounds());
++  views::View::ConvertRectToTarget(tab, this, &bounds);
++  location_bar_view_->SetBoundsRect(
++      GetMirroredRect(gfx::ToEnclosingRect(bounds)));
++}
++
+ bool ToolbarView::IsDynamicLayout() const {
+   auto* controller =
+       HeliumLayoutStateController::From(browser_view_->browser());
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -443,6 +443,9 @@ class LocationBarView
+ 
+   bool ShouldHidePageActionIcons() const;
+ 
++  // Returns whether this location bar is placed over the active tab.
++  bool IsUltraCompact() const;
++
+   struct PageActionInfo {
+     // Is the AIM page action the right-most visible page action?
+     bool is_aim_last_visible_page_action = false;
+@@ -592,6 +595,14 @@ class LocationBarView
+   // user to clear all text.
+   raw_ptr<views::ImageButton> clear_all_button_ = nullptr;
+ 
++  // Closes the tab in ultra compact layout, where the location bar replaces
++  // the active tab.
++  raw_ptr<views::ImageButton> close_tab_button_ = nullptr;
++
++  // Refreshes the favicon shown in ultra compact layout.
++  base::CallbackListSubscription tab_ui_subscription_;
++  base::CallbackListSubscription helium_layout_subscription_;
++
+   // A label to show the AI Mode hint text.
+   raw_ptr<views::Label> ai_mode_hint_label_ = nullptr;
+ 
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -23,6 +23,7 @@
+ #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/command_updater.h"
++#include "chrome/browser/favicon/favicon_utils.h"
+ #include "chrome/browser/page_info/merchant_trust_service_factory.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/search_engines/template_url_service_factory.h"
+@@ -38,6 +39,7 @@
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/content_settings/content_setting_bubble_model.h"
++#include "chrome/browser/ui/helium/helium_layout_state_controller.h"
+ #include "chrome/browser/ui/layout_constants.h"
+ #include "chrome/browser/ui/lens/lens_overlay_entry_point_controller.h"
+ #include "chrome/browser/ui/omnibox/ai_mode_page_action_controller.h"
+@@ -53,9 +55,13 @@
+ #include "chrome/browser/ui/page_action/page_action_icon_type.h"
+ #include "chrome/browser/ui/page_action/page_action_properties_provider.h"
+ #include "chrome/browser/ui/passwords/manage_passwords_ui_controller.h"
++#include "chrome/browser/ui/tab_ui_helper.h"
+ #include "chrome/browser/ui/tabs/public/tab_features.h"
+ #include "chrome/browser/ui/tabs/saved_tab_groups/saved_tab_group_utils.h"
++#include "chrome/browser/ui/tabs/tab_enums.h"
++#include "chrome/browser/ui/tabs/tab_favicon_theming.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_delegate.h"
+ #include "chrome/browser/ui/ui_features.h"
+ #include "chrome/browser/ui/views/bubble_anchor_util_views.h"
+ #include "chrome/browser/ui/views/chrome_layout_provider.h"
+@@ -118,6 +124,7 @@
+ #include "components/search_engines/template_url_service.h"
+ #include "components/security_state/core/security_state.h"
+ #include "components/startup_metric_utils/common/startup_metric_utils.h"
++#include "components/strings/grit/components_strings.h"
+ #include "content/public/browser/navigation_entry.h"
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
+@@ -142,6 +149,7 @@
+ #include "ui/events/event.h"
+ #include "ui/gfx/animation/slide_animation.h"
+ #include "ui/gfx/canvas.h"
++#include "ui/gfx/geometry/rrect_f.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/image/image.h"
+ #include "ui/gfx/paint_vector_icon.h"
+@@ -149,6 +157,7 @@
+ #include "ui/gfx/vector_icon_types.h"
+ #include "ui/menus/simple_menu_model.h"
+ #include "ui/views/accessibility/view_accessibility.h"
++#include "ui/views/animation/ink_drop.h"
+ #include "ui/views/background.h"
+ #include "ui/views/border.h"
+ #include "ui/views/button_drag_utils.h"
+@@ -173,6 +182,20 @@ namespace {
+ 
+ namespace {
+ 
++// Highlights the close button like the tab close button: a small rounded
++// square around the icon instead of the full height of the location bar.
++class CloseTabButtonHighlightPathGenerator
++    : public views::HighlightPathGenerator {
++ public:
++  std::optional<gfx::RRectF> GetRoundRect(const gfx::RectF& rect) override {
++    constexpr float kCornerRadius = 4;
++    const float size = GetLayoutConstant(LayoutConstant::kTabCloseButtonSize);
++    gfx::RectF bounds = rect;
++    bounds.ClampToCenteredSize(gfx::SizeF(size, size));
++    return gfx::RRectF(bounds, kCornerRadius);
++  }
++};
++
+ int IncrementalMinimumWidth(const views::View* view) {
+   return (view && view->GetVisible()) ? view->GetMinimumSize().width() : 0;
+ }
+@@ -510,6 +533,44 @@ void LocationBarView::Init() {
+   page_action_container_->SetVisible(
+       !base::FeatureList::IsEnabled(features::kHeliumHidePageActions));
+ 
++  auto close_tab_button = views::CreateVectorImageButtonWithNativeTheme(
++      base::BindRepeating(
++          [](LocationBarView* view) {
++            // Close only the active tab, like the tab's own close button.
++            TabStripModel* const model = view->browser_->GetTabStripModel();
++            if (tabs::TabInterface* const tab = model->GetActiveTab()) {
++              model->delegate()->CloseTab(tab, CloseTabSource::kFromMouse);
++            }
++          },
++          base::Unretained(this)),
++      // Match the tab close button.
++      features::IsRoundedIconsEnabled() ? kCloseWeight500CustomIcon
++                                        : kCloseTabChromeRefreshOldIcon,
++      GetLayoutConstant(LayoutConstant::kTabCloseButtonSize),
++      kColorLocationBarClearAllButtonIcon,
++      kColorLocationBarClearAllButtonIconDisabled);
++  close_tab_button->SetBorder(views::CreateEmptyBorder(
++      GetLayoutInsets(LOCATION_BAR_ICON_INTERIOR_PADDING)));
++  close_tab_button->SetTooltipText(
++      l10n_util::GetStringUTF16(IDS_ACCNAME_CLOSE));
++  views::HighlightPathGenerator::Install(
++      close_tab_button.get(),
++      std::make_unique<CloseTabButtonHighlightPathGenerator>());
++  views::InkDrop::Get(close_tab_button.get())->SetHighlightOpacity(0.16f);
++  views::InkDrop::Get(close_tab_button.get())->SetVisibleOpacity(0.14f);
++  close_tab_button->SetVisible(false);
++  close_tab_button_ = AddChildView(std::move(close_tab_button));
++
++  if (browser_) {
++    if (auto* controller = HeliumLayoutStateController::From(browser_)) {
++      helium_layout_subscription_ =
++          controller->RegisterOnStateChanged(base::IgnoreArgs<
++                                             HeliumLayoutStateController*>(
++              base::BindRepeating(&LocationBarView::UpdateWithoutTabRestore,
++                                  base::Unretained(this))));
++    }
++  }
++
+   auto clear_all_button = views::CreateVectorImageButton(base::BindRepeating(
+       static_cast<void (OmniboxView::*)(const std::u16string&)>(
+           &OmniboxView::SetUserText),
+@@ -916,6 +977,9 @@ void LocationBarView::Layout(PassKey) {
+     }
+   };
+ 
++  add_trailing_decoration(close_tab_button_, /*intra_item_padding=*/0,
++                          /*edge_padding=*/trailing_decorations_edge_padding);
++
+   if (features::IsPageActionsElevatedToolbarEnabled()) {
+     if (page_action_container_ && page_action_container_->GetVisible()) {
+       const bool is_capsule_active = page_action_container_->IsCapsuleActive();
+@@ -1088,6 +1152,20 @@ void LocationBarView::Update(WebContents
+   TRACE_EVENT("omnibox", "LocationBarView::Update");
+   loading_progress_view_->SetWebContents(GetWebContents());
+ 
++  // In ultra compact layout the location bar replaces the active tab: it shows
++  // the tab's favicon and a close button.
++  const bool ultra_compact = IsUltraCompact();
++  close_tab_button_->SetVisible(ultra_compact);
++  tab_ui_subscription_ = {};
++  if (tabs::TabInterface* tab =
++          ultra_compact ? browser_->GetActiveTabInterface() : nullptr) {
++    tab_ui_subscription_ =
++        TabUIHelper::From(tab)->AddTabUIChangeCallback(base::BindRepeating(
++            &LocationIconView::Update,
++            base::Unretained(location_icon_view_.get()),
++            /*suppress_animations=*/false, /*force_hide_background=*/false));
++  }
++
+   RefreshContentSettingViews();
+   RefreshPageActionIconViews();
+   location_icon_view_->Update(
+@@ -1328,6 +1406,12 @@ bool LocationBarView::ShouldHidePageActi
+   return GetOmniboxController()->IsPopupOpen();
+ }
+ 
++bool LocationBarView::IsUltraCompact() const {
++  auto* controller =
++      browser_ ? HeliumLayoutStateController::From(browser_) : nullptr;
++  return !is_popup_mode_ && controller && controller->IsUltraCompactLayout();
++}
++
+ // Returns information about visible page actions in the location bar.
+ LocationBarView::PageActionInfo LocationBarView::GetPageActionInfo() const {
+   PageActionInfo info;
+@@ -1519,7 +1603,13 @@ bool LocationBarView::RefreshContentSett
+         }
+       }
+     } else {
+-      v->Update();
++      // Ultra compact layout hides the content setting icons on the right.
++      // Activity indicators on the left are unaffected.
++      if (IsUltraCompact()) {
++        v->SetVisible(false);
++      } else {
++        v->Update();
++      }
+       if (was_visible != v->GetVisible()) {
+         visibility_changed = true;
+       }
+@@ -2250,6 +2340,27 @@ ui::ImageModel LocationBarView::GetLocat
+     return GetOmniboxController()->edit_model()->GetAddContextIcon(dip_size);
+   }
+ 
++  // Show the site's favicon in place of the page info icon, unless a security
++  // warning is shown next to it.
++  if (omnibox_view_ && IsUltraCompact() &&
++      !location_icon_view_->GetShowText() &&
++      GetLocationBarModel()->GetSecurityLevel() != security_state::DANGEROUS &&
++      GetOmniboxController()->edit_model()->ShouldShowCurrentPageIcon()) {
++    if (tabs::TabInterface* tab = browser_->GetActiveTabInterface()) {
++      TabUIHelper* const tab_ui_helper = TabUIHelper::From(tab);
++      if (const ui::ImageModel favicon = tab_ui_helper->GetFavicon();
++          !favicon.IsEmpty()) {
++        const ui::ColorProvider* const color_provider = GetColorProvider();
++        if (!tab_ui_helper->ShouldThemifyFavicon() || !color_provider) {
++          return favicon;
++        }
++        return ui::ImageModel::FromImageSkia(tabs::ThemeFaviconForTab(
++            favicon.Rasterize(color_provider), *color_provider));
++      }
++    }
++    return favicon::GetDefaultFaviconModel(kColorLocationBarBackground);
++  }
++
+   return omnibox_view_
+              ? omnibox_view_->GetIcon(
+                    dip_size, location_icon_view_->GetForegroundColor(),
+--- a/chrome/browser/ui/views/location_bar/BUILD.gn
++++ b/chrome/browser/ui/views/location_bar/BUILD.gn
+@@ -121,6 +121,7 @@ source_set("impl") {
+       "//chrome/browser/extensions",
+       "//chrome/browser/extensions/api/debugger:warning_status",
+       "//chrome/browser/extensions/api/omnibox",
++      "//chrome/browser/favicon",
+       "//chrome/browser/glic",
+       "//chrome/browser/history_embeddings",
+       "//chrome/browser/page_info",
+@@ -132,6 +133,7 @@ source_set("impl") {
+       "//chrome/browser/translate",
+       "//chrome/browser/ui:browser_actions",
+       "//chrome/browser/ui:bubble_anchor_util",
++      "//chrome/browser/ui:tab_ui_helper",
+       "//chrome/browser/ui:ui_features",
+       "//chrome/browser/ui:view_ids",
+       "//chrome/browser/ui/actions",
+@@ -141,11 +143,15 @@ source_set("impl") {
+       "//chrome/browser/ui/color:color_headers",
+       "//chrome/browser/ui/contextual_search",
+       "//chrome/browser/ui/find_bar",
++      "//chrome/browser/ui/helium:helium_layout_state_controller",
+       "//chrome/browser/ui/lens",
+       "//chrome/browser/ui/omnibox",
+       "//chrome/browser/ui/passwords",
+       "//chrome/browser/ui/record_replay",
+       "//chrome/browser/ui/search",
++      "//chrome/browser/ui/tabs:favicon_theming",
++      "//chrome/browser/ui/tabs:tab_enums",
++      "//chrome/browser/ui/tabs:tab_strip",
+       "//chrome/browser/ui/tabs:tabs_public",
+       "//chrome/browser/ui/tabs/saved_tab_groups",
+       "//chrome/browser/ui/user_education",
+--- a/chrome/browser/ui/views/toolbar/BUILD.gn
++++ b/chrome/browser/ui/views/toolbar/BUILD.gn
+@@ -251,6 +251,7 @@ source_set("impl") {
+     "//chrome/browser/ui/views/profiles:avatar_toolbar_button",
+     "//chrome/browser/ui/views/tabs:base",
+     "//chrome/browser/ui/views/tabs:tab_strip",
++    "//chrome/browser/ui/views/tabs:tab_style_views",
+     "//chrome/browser/ui/views/tabs/glic",
+     "//chrome/browser/ui/waap",
+     "//chrome/browser/ui/waap:manager",
