@@ -293,6 +293,35 @@
      // The selection change will have modified the ideal bounds of the tabs. We
      // need to recompute and retarget the animation to these new bounds. Note:
      // This is safe even if we're in the midst of mouse-based tab closure--we
+@@ -1380,10 +1385,15 @@ void TabContainerImpl::UpdateClosingMode
+   // When removing an active, non-pinned tab, the next active tab will be
+   // given the active width (unless it is pinned). Thus the width being
+   // removed from the container is really the current width of whichever
+-  // inactive tab will be made active.
+-  if (was_active && !tab_being_removed->data().pinned &&
+-      layout_helper_->layout_domain() ==
+-          LayoutDomain::kInactiveWidthBelowActiveWidth) {
++  // inactive tab will be made active. A fixed active tab width applies to
++  // every tab.
++  const bool active_width_override =
++      controller_->GetActiveTabWidthOverride().has_value();
++  if (was_active &&
++      (active_width_override ||
++       (!tab_being_removed->data().pinned &&
++        layout_helper_->layout_domain() ==
++            LayoutDomain::kInactiveWidthBelowActiveWidth))) {
+     const std::optional<int> next_active_viewmodel_index =
+         controller_->GetActiveIndex();
+     // The next active tab may not be in this TabContainer.
+@@ -1397,7 +1407,7 @@ void TabContainerImpl::UpdateClosingMode
+       const int next_active_index = next_active_viewmodel_index.value() +
+                                     (adjust_for_removed_tab ? 1 : 0);
+       const Tab* const next_active_tab = GetTabAtModelIndex(next_active_index);
+-      if (!next_active_tab->data().pinned) {
++      if (active_width_override || !next_active_tab->data().pinned) {
+         size_delta = next_active_tab->width();
+       }
+     }
 --- a/chrome/browser/ui/views/tabs/tab.cc
 +++ b/chrome/browser/ui/views/tabs/tab.cc
 @@ -587,7 +587,8 @@ void Tab::Layout(PassKey) {
@@ -627,7 +656,15 @@
  
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-@@ -23,6 +23,7 @@
+@@ -11,6 +11,7 @@
+ #include <string_view>
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+@@ -23,6 +24,7 @@
  #include "chrome/browser/autocomplete/autocomplete_classifier_factory.h"
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/command_updater.h"
@@ -635,7 +672,7 @@
  #include "chrome/browser/page_info/merchant_trust_service_factory.h"
  #include "chrome/browser/profiles/profile.h"
  #include "chrome/browser/search_engines/template_url_service_factory.h"
-@@ -38,6 +39,7 @@
+@@ -38,6 +40,7 @@
  #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
  #include "chrome/browser/ui/color/chrome_color_id.h"
  #include "chrome/browser/ui/content_settings/content_setting_bubble_model.h"
@@ -643,7 +680,7 @@
  #include "chrome/browser/ui/layout_constants.h"
  #include "chrome/browser/ui/lens/lens_overlay_entry_point_controller.h"
  #include "chrome/browser/ui/omnibox/ai_mode_page_action_controller.h"
-@@ -53,9 +55,13 @@
+@@ -53,9 +56,13 @@
  #include "chrome/browser/ui/page_action/page_action_icon_type.h"
  #include "chrome/browser/ui/page_action/page_action_properties_provider.h"
  #include "chrome/browser/ui/passwords/manage_passwords_ui_controller.h"
@@ -657,7 +694,7 @@
  #include "chrome/browser/ui/ui_features.h"
  #include "chrome/browser/ui/views/bubble_anchor_util_views.h"
  #include "chrome/browser/ui/views/chrome_layout_provider.h"
-@@ -118,6 +124,7 @@
+@@ -118,6 +125,7 @@
  #include "components/search_engines/template_url_service.h"
  #include "components/security_state/core/security_state.h"
  #include "components/startup_metric_utils/common/startup_metric_utils.h"
@@ -665,7 +702,7 @@
  #include "content/public/browser/navigation_entry.h"
  #include "content/public/browser/render_widget_host_view.h"
  #include "content/public/browser/web_contents.h"
-@@ -142,6 +149,7 @@
+@@ -142,6 +150,7 @@
  #include "ui/events/event.h"
  #include "ui/gfx/animation/slide_animation.h"
  #include "ui/gfx/canvas.h"
@@ -673,7 +710,7 @@
  #include "ui/gfx/geometry/skia_conversions.h"
  #include "ui/gfx/image/image.h"
  #include "ui/gfx/paint_vector_icon.h"
-@@ -149,6 +157,7 @@
+@@ -149,6 +158,7 @@
  #include "ui/gfx/vector_icon_types.h"
  #include "ui/menus/simple_menu_model.h"
  #include "ui/views/accessibility/view_accessibility.h"
@@ -681,7 +718,7 @@
  #include "ui/views/background.h"
  #include "ui/views/border.h"
  #include "ui/views/button_drag_utils.h"
-@@ -173,6 +182,20 @@ namespace {
+@@ -173,6 +183,20 @@ namespace {
  
  namespace {
  
@@ -702,7 +739,7 @@
  int IncrementalMinimumWidth(const views::View* view) {
    return (view && view->GetVisible()) ? view->GetMinimumSize().width() : 0;
  }
-@@ -510,6 +533,44 @@ void LocationBarView::Init() {
+@@ -510,6 +534,45 @@ void LocationBarView::Init() {
    page_action_container_->SetVisible(
        !base::FeatureList::IsEnabled(features::kHeliumHidePageActions));
  
@@ -711,7 +748,8 @@
 +          [](LocationBarView* view) {
 +            // Close only the active tab, like the tab's own close button.
 +            TabStripModel* const model = view->browser_->GetTabStripModel();
-+            if (tabs::TabInterface* const tab = model->GetActiveTab()) {
++            if (tabs::TabInterface* const tab = model->GetActiveTab();
++                tab && !tab->IsPinned()) {
 +              model->delegate()->CloseTab(tab, CloseTabSource::kFromMouse);
 +            }
 +          },
@@ -747,7 +785,7 @@
    auto clear_all_button = views::CreateVectorImageButton(base::BindRepeating(
        static_cast<void (OmniboxView::*)(const std::u16string&)>(
            &OmniboxView::SetUserText),
-@@ -916,6 +977,9 @@ void LocationBarView::Layout(PassKey) {
+@@ -916,6 +979,9 @@ void LocationBarView::Layout(PassKey) {
      }
    };
  
@@ -757,28 +795,35 @@
    if (features::IsPageActionsElevatedToolbarEnabled()) {
      if (page_action_container_ && page_action_container_->GetVisible()) {
        const bool is_capsule_active = page_action_container_->IsCapsuleActive();
-@@ -1088,6 +1152,20 @@ void LocationBarView::Update(WebContents
+@@ -1088,6 +1154,27 @@ void LocationBarView::Update(WebContents
    TRACE_EVENT("omnibox", "LocationBarView::Update");
    loading_progress_view_->SetWebContents(GetWebContents());
  
 +  // In ultra compact layout the location bar replaces the active tab: it shows
 +  // the tab's favicon and a close button.
 +  const bool ultra_compact = IsUltraCompact();
-+  close_tab_button_->SetVisible(ultra_compact);
++  tabs::TabInterface* const active_tab =
++      ultra_compact ? browser_->GetActiveTabInterface() : nullptr;
++  // Like the tab's own close button, hidden for pinned tabs.
++  close_tab_button_->SetVisible(
++      active_tab && !active_tab->IsPinned() &&
++      !base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "hide-tab-close-buttons"));
 +  tab_ui_subscription_ = {};
-+  if (tabs::TabInterface* tab =
-+          ultra_compact ? browser_->GetActiveTabInterface() : nullptr) {
++  if (active_tab) {
 +    tab_ui_subscription_ =
-+        TabUIHelper::From(tab)->AddTabUIChangeCallback(base::BindRepeating(
-+            &LocationIconView::Update,
-+            base::Unretained(location_icon_view_.get()),
-+            /*suppress_animations=*/false, /*force_hide_background=*/false));
++        TabUIHelper::From(active_tab)
++            ->AddTabUIChangeCallback(base::BindRepeating(
++                &LocationIconView::Update,
++                base::Unretained(location_icon_view_.get()),
++                /*suppress_animations=*/false,
++                /*force_hide_background=*/false));
 +  }
 +
    RefreshContentSettingViews();
    RefreshPageActionIconViews();
    location_icon_view_->Update(
-@@ -1328,6 +1406,12 @@ bool LocationBarView::ShouldHidePageActi
+@@ -1328,6 +1415,12 @@ bool LocationBarView::ShouldHidePageActi
    return GetOmniboxController()->IsPopupOpen();
  }
  
@@ -791,7 +836,7 @@
  // Returns information about visible page actions in the location bar.
  LocationBarView::PageActionInfo LocationBarView::GetPageActionInfo() const {
    PageActionInfo info;
-@@ -1519,7 +1603,13 @@ bool LocationBarView::RefreshContentSett
+@@ -1519,7 +1612,13 @@ bool LocationBarView::RefreshContentSett
          }
        }
      } else {
@@ -806,7 +851,7 @@
        if (was_visible != v->GetVisible()) {
          visibility_changed = true;
        }
-@@ -2250,6 +2340,27 @@ ui::ImageModel LocationBarView::GetLocat
+@@ -2250,6 +2349,27 @@ ui::ImageModel LocationBarView::GetLocat
      return GetOmniboxController()->edit_model()->GetAddContextIcon(dip_size);
    }
  
